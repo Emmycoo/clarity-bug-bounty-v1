@@ -4,6 +4,8 @@
 (define-constant err-not-found (err u101))
 (define-constant err-already-exists (err u102))
 (define-constant err-insufficient-funds (err u103))
+(define-constant err-invalid-status (err u104))
+(define-constant err-not-hunter (err u105))
 
 ;; Define data vars
 (define-map bounties
@@ -13,7 +15,11 @@
         description: (string-ascii 500),
         reward: uint,
         status: (string-ascii 20),
-        hunter: (optional principal)
+        hunter: (optional principal),
+        dispute: (optional {
+          reason: (string-ascii 200),
+          resolved: bool
+        })
     }
 )
 
@@ -34,7 +40,8 @@
                         description: description,
                         reward: reward,
                         status: "open",
-                        hunter: none
+                        hunter: none,
+                        dispute: none
                     }
                 )
                 (var-set next-bounty-id (+ bounty-id u1))
@@ -60,7 +67,8 @@
                         description: (get description bounty),
                         reward: (get reward bounty),
                         status: "submitted",
-                        hunter: (some tx-sender)
+                        hunter: (some tx-sender),
+                        dispute: none
                     }
                 )
                 (ok true)
@@ -70,7 +78,86 @@
     )
 )
 
-;; Approve and pay bounty
+;; File a dispute
+(define-public (file-dispute (bounty-id uint) (reason (string-ascii 200)))
+    (let
+        (
+            (bounty (unwrap! (map-get? bounties { bounty-id: bounty-id }) err-not-found))
+            (hunter (unwrap! (get hunter bounty) err-not-found))
+        )
+        (if (and (is-eq tx-sender hunter) (is-eq (get status bounty) "submitted"))
+            (begin
+                (map-set bounties
+                    { bounty-id: bounty-id }
+                    {
+                        title: (get title bounty),
+                        description: (get description bounty),
+                        reward: (get reward bounty),
+                        status: "disputed",
+                        hunter: (some hunter),
+                        dispute: (some {
+                            reason: reason,
+                            resolved: false
+                        })
+                    }
+                )
+                (ok true)
+            )
+            err-not-hunter
+        )
+    )
+)
+
+;; Resolve dispute
+(define-public (resolve-dispute (bounty-id uint) (approve bool))
+    (let
+        (
+            (bounty (unwrap! (map-get? bounties { bounty-id: bounty-id }) err-not-found))
+            (hunter (unwrap! (get hunter bounty) err-not-found))
+        )
+        (if (and (is-eq tx-sender contract-owner) (is-eq (get status bounty) "disputed"))
+            (begin
+                (if approve
+                    (begin
+                        (try! (stx-transfer? (get reward bounty) tx-sender hunter))
+                        (map-set bounties
+                            { bounty-id: bounty-id }
+                            {
+                                title: (get title bounty),
+                                description: (get description bounty),
+                                reward: (get reward bounty),
+                                status: "paid",
+                                hunter: (some hunter),
+                                dispute: (some {
+                                    reason: (get reason (unwrap! (get dispute bounty) err-not-found)),
+                                    resolved: true
+                                })
+                            }
+                        ))
+                    (begin
+                        (map-set bounties
+                            { bounty-id: bounty-id }
+                            {
+                                title: (get title bounty),
+                                description: (get description bounty),
+                                reward: (get reward bounty),
+                                status: "rejected",
+                                hunter: none,
+                                dispute: (some {
+                                    reason: (get reason (unwrap! (get dispute bounty) err-not-found)),
+                                    resolved: true
+                                })
+                            }
+                        ))
+                )
+                (ok true)
+            )
+            err-owner-only
+        )
+    )
+)
+
+;; Approve and pay bounty 
 (define-public (approve-bounty (bounty-id uint))
     (let
         (
@@ -87,7 +174,8 @@
                         description: (get description bounty),
                         reward: (get reward bounty),
                         status: "paid",
-                        hunter: (some hunter)
+                        hunter: (some hunter),
+                        dispute: none
                     }
                 )
                 (ok true)
